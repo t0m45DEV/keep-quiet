@@ -102,6 +102,7 @@ static void mic_task(void *arg)
             }
         }
 
+        best_rms *= 0.9f;
         float level = (20.0f * log10f(best_rms + 1.0f) - 20.0f) * (100.0f / 60.0f);
         level = level < 0 ? 0 : (level > 100 ? 100 : level);
 
