@@ -112,6 +112,9 @@ static void format_target(char *buffer, size_t size, uint32_t target, uint32_t d
 
 static const char *modifier_name_for_mask(uint32_t mask)
 {
+    if (mask != 0 && (mask & (mask - 1)) == 0) {
+        return "";
+    }
     for (int i = 1; i < 8; i++) {
         if (mask == s_modifier_masks[i]) {
             return s_modifier_names[i];
@@ -226,7 +229,7 @@ static void draw_start_screen(const char *message, bool hard_mode)
         display_text(26, hard_mode ? 38 : 24, ">", false);
         display_text(35, 24, "NORMAL", false);
         display_text(35, 38, "RE DIFICIL", false);
-        display_text(22, 54, "APRETAME START", false);
+        display_text(22, 54, "APRETAME EL START  V", false);
     }
 }
 
@@ -322,9 +325,9 @@ void app_main(void)
 
     if (display_ok) {
         display_clear();
-        display_text(10, 8, "Hello, Hackathon!", false);
-        display_text(10, 24, "ESP32-S3 dev board", false);
-        display_text(10, 40, "Self test...", false);
+        display_text(10, 8, "Un juego hecho", false);
+        display_text(10, 24, "por daltonicos,", false);
+        display_text(10, 40, "para daltonicos...", false);
         display_flush();
     }
 
