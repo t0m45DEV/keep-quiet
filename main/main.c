@@ -9,6 +9,7 @@
 #include "audio.h"
 #include "buttons.h"
 #include "display.h"
+#include "peer_link.h"
 
 static const char *TAG = "demo";
 
@@ -19,6 +20,7 @@ static const char *TAG = "demo";
 #define BOOM_FRAME_MS 80
 #define BOOM_FRAME_COUNT 5
 #define BOOM_TITLE_HOLD_MS 600
+#define PEER_PACKET_RETRY_MS 500
 #define DIRECTION_STABLE_MS 80
 #define SILENCE_LEVEL 80
 #define MIC_REARM_DELAY_MS 500
@@ -88,19 +90,10 @@ static const char *s_timeout_messages[] = {
     "\"Meep, meep.\"\n-El correcaminos.",
     "Kuchau.",
     "Gotta go fast!",
-    "Se te enfría el mate, pibe.",
+    "Se te enfria el mate, pibe.",
     "Tick Tock on the clock.",
     "Mission failed. \nWe'll get 'em next time."
 };
-
-// Elige un objetivo aleatorio distinto del actual.
-static uint32_t next_direction(uint32_t current, uint32_t count){
-    uint32_t next = esp_random() % (count - 1);
-    if (next >= current) {
-        next++;
-    }
-    return next;
-}
 
 static bool is_c4_target(uint32_t target, uint32_t direction_count){
     const uint32_t direction_index = target % direction_count;
@@ -308,15 +301,29 @@ static void draw_intro_screen(void)
     display_text(22, 54, "PRESIONE START", false);
 }
 
-static void draw_centered_text(const char *text, int y)
-{
+static void draw_centered_text(const char *text, int y){
     const int x = (128 - (int)strlen(text) * DISPLAY_FONT_W) / 2;
     display_text(x, y, text, false);
 }
 
+static void draw_waiting_for_player(void){
+    display_clear();
+    draw_centered_text("ESPERANDO", 20);
+    draw_centered_text("AL OTRO JUGADOR", 34);
+}
+
+static void draw_peer_link_screen(bool connected, bool local_is_a){
+    display_clear();
+    draw_centered_text(connected ? "PLACAS CONECTADAS" : "BUSCANDO OTRA", 16);
+    draw_centered_text(connected ? (local_is_a ? "SOY PLACA A" : "SOY PLACA B")
+                                 : "PLACA...", 30);
+    if (!connected) {
+        draw_centered_text("ENCIENDAN LAS DOS", 46);
+    }
+}
+
 // Dibuja líneas centradas en un área, respetando los saltos de línea del mensaje.
-static void draw_centered_message(const char *message, int area_y, int area_height)
-{
+static void draw_centered_message(const char *message, int area_y, int area_height){
     int line_count = 1;
     for (const char *p = message; *p; p++) {
         if (*p == '\n') {
@@ -349,8 +356,7 @@ static void draw_centered_message(const char *message, int area_y, int area_heig
 }
 
 // Muestra el inicio y el mensaje aleatorio seleccionado, si lo hay.
-static void draw_start_screen(const char *message, bool hard_mode)
-{
+static void draw_start_screen(const char *message, bool hard_mode){
     display_clear();
     if (message != NULL) {
         draw_centered_message(message, 12, 24);
@@ -365,13 +371,12 @@ static void draw_start_screen(const char *message, bool hard_mode)
 }
 
 // Muestra el mensaje de derrota, el puntaje y las acciones disponibles.
-static void draw_defeat_screen(const char *message, uint32_t total_score, uint32_t selection)
-{
+static void draw_defeat_screen(const char *message, uint32_t total_score, uint32_t selection){
     char score_line[32];
 
     display_clear();
     draw_centered_message(message, 0, 24);
-    const int score_length = snprintf(score_line, sizeof(score_line), "Puntos totales: %u",
+    const int score_length = snprintf(score_line, sizeof(score_line), "Personas salvadas: %u",
                                       (unsigned int)total_score);
     const char *score_text = score_line;
     if (score_length * DISPLAY_FONT_W > 128) {
@@ -387,8 +392,7 @@ static void draw_defeat_screen(const char *message, uint32_t total_score, uint32
 // Dibuja la interfaz del juego, el temporizador y los controles.
 static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, bool audio_ok,
                     const char *game_status, int timer_ms, int timer_duration_ms, uint32_t streak,
-                    bool hard_mode, bool c4_target)
-{
+                    bool hard_mode, bool c4_target){
     char line[24];
 
     display_clear();
@@ -482,6 +486,19 @@ void app_main(void)
         }
     }
 
+    if (display_ok) {
+        draw_peer_link_screen(false, false);
+        display_flush();
+    }
+    ESP_ERROR_CHECK(peer_link_start());
+    ESP_ERROR_CHECK(peer_link_wait());
+    const bool local_is_a = peer_link_is_a();
+    if (display_ok) {
+        draw_peer_link_screen(true, local_is_a);
+        display_flush();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
     bool audio_ok = audio_init() == ESP_OK;
     if (audio_ok) {
         const int notes[] = {523, 659, 784};
@@ -498,8 +515,26 @@ void app_main(void)
     const uint32_t modifier_count = (uint32_t)(sizeof(s_modifier_masks) / sizeof(s_modifier_masks[0]));
     const uint32_t target_count = direction_count * modifier_count;
     uint32_t target = esp_random() % target_count;
+    uint32_t peer_target = 0;
+    uint32_t local_code_round = 0;
+    uint32_t peer_code_round = 0;
+    bool peer_target_ready = false;
+    bool local_answer_ready = false;
     bool showing_result = false;
     bool game_active = false;
+    bool waiting_for_peer_start = false;
+    bool local_ready = false;
+    bool peer_ready = false;
+    bool ready_mode = false;
+    bool peer_ready_mode = false;
+    TickType_t last_ready_sent = 0;
+    TickType_t last_code_sent = 0;
+    TickType_t last_result_sent = 0;
+    TickType_t last_failure_sent = 0;
+    TickType_t last_score_sent = 0;
+    uint32_t failure_reason = 0;
+    bool failure_from_peer = false;
+    int local_remaining_ms = GAME_TIMER_MS;
     bool showing_timeout_message = false;
     bool timeout_boom = false;
     uint32_t volume_message = 0;
@@ -510,6 +545,7 @@ void app_main(void)
     bool start_armed = true;
     uint32_t streak = 0;
     uint32_t total_score = 0;
+    uint32_t peer_total_score = 0;
     uint32_t active_colors = 0;
     int round_timer_ms = GAME_TIMER_MS;
     uint32_t previous_buttons = 0;
@@ -539,8 +575,152 @@ void app_main(void)
         const TickType_t now = xTaskGetTickCount();
         const uint32_t all_buttons = buttons_read();
         const int mic_level = audio_ok ? audio_mic_level() : 0;
-        const bool can_detect_noise = game_active && !showing_result && !showing_silence &&
-                                      now >= mic_detection_after;
+        peer_link_message_t peer_message;
+        while (peer_link_receive(&peer_message)) {
+            if (peer_message.type == PEER_LINK_MESSAGE_SCORE) {
+                if (showing_silence || showing_timeout_message || showing_volume_message) {
+                    peer_total_score = peer_message.value;
+                }
+            } else if (peer_message.type == PEER_LINK_MESSAGE_READY) {
+                if (peer_message.value > 1) {
+                    continue;
+                }
+                peer_ready = true;
+                peer_ready_mode = peer_message.value != 0;
+            } else if (peer_message.type == PEER_LINK_MESSAGE_FAILURE &&
+                       (peer_message.value == 1 || peer_message.value == 2) &&
+                       game_active && !showing_silence) {
+                game_active = false;
+                showing_silence = true;
+                showing_result = false;
+                boom_started = now;
+                failure_reason = peer_message.value;
+                failure_from_peer = true;
+                timeout_boom = failure_reason == 1;
+                volume_boom = failure_reason == 2;
+                showing_timeout_message = false;
+                showing_volume_message = false;
+                local_ready = false;
+                peer_ready = false;
+                waiting_for_peer_start = false;
+                active_colors = 0;
+                start_armed = false;
+                wait_for_neutral = true;
+                candidate = 0;
+            } else if (showing_silence) {
+                continue;
+            } else if (peer_message.type == PEER_LINK_MESSAGE_CODE &&
+                       game_active && peer_message.value < target_count &&
+                       (!peer_target_ready || peer_message.round > peer_code_round)) {
+                peer_target = peer_message.value;
+                peer_code_round = peer_message.round;
+                peer_target_ready = true;
+                local_ready = false;
+                showing_result = false;
+                local_answer_ready = false;
+                last_result_sent = 0;
+                game_started = now;
+                local_remaining_ms = round_timer_ms;
+                mic_detection_after = now + pdMS_TO_TICKS(MIC_STARTUP_DELAY_MS);
+                active_colors = 0;
+                wait_for_neutral = true;
+                candidate = 0;
+            } else if (peer_message.type == PEER_LINK_MESSAGE_RESULT &&
+                       game_active &&
+                       peer_message.round == local_code_round &&
+                       peer_message.value <= 1) {
+                if (peer_message.value != 0) {
+                    target = esp_random() % target_count;
+                    local_code_round++;
+                    last_code_sent = 0;
+                }
+            }
+        }
+
+        if (local_ready &&
+            (waiting_for_peer_start || (game_active && !peer_target_ready)) &&
+            (last_ready_sent == 0 ||
+             now - last_ready_sent >= pdMS_TO_TICKS(PEER_PACKET_RETRY_MS))) {
+            const esp_err_t ready_err = peer_link_send_ready(ready_mode);
+            if (ready_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not announce game start: %s", esp_err_to_name(ready_err));
+            }
+            last_ready_sent = now;
+        }
+
+        if (waiting_for_peer_start && local_ready && peer_ready) {
+            hard_mode = local_is_a ? ready_mode : peer_ready_mode;
+            waiting_for_peer_start = false;
+            peer_ready = false;
+            game_active = true;
+            game_started = now;
+            mic_detection_after = now + pdMS_TO_TICKS(MIC_STARTUP_DELAY_MS);
+            round_timer_ms = GAME_TIMER_MS;
+            local_code_round = 0;
+            peer_code_round = 0;
+            target = esp_random() % target_count;
+            peer_target_ready = false;
+            local_answer_ready = false;
+            showing_result = false;
+            local_remaining_ms = round_timer_ms;
+            last_code_sent = 0;
+            last_result_sent = 0;
+            last_failure_sent = 0;
+            last_score_sent = 0;
+            failure_from_peer = false;
+            active_colors = 0;
+            streak = 0;
+            total_score = 0;
+            peer_total_score = 0;
+            loud_noise_candidate = false;
+            wait_for_neutral = true;
+        }
+
+        if (game_active &&
+            (last_code_sent == 0 ||
+             now - last_code_sent >= pdMS_TO_TICKS(PEER_PACKET_RETRY_MS))) {
+            const esp_err_t code_err = peer_link_send_code(local_code_round, target);
+            if (code_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not send round code: %s", esp_err_to_name(code_err));
+            }
+            last_code_sent = now;
+        }
+
+        if (local_answer_ready &&
+            (last_result_sent == 0 ||
+             now - last_result_sent >= pdMS_TO_TICKS(PEER_PACKET_RETRY_MS))) {
+            const esp_err_t result_err =
+                peer_link_send_result(peer_code_round, answer_correct);
+            if (result_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not send round result: %s", esp_err_to_name(result_err));
+            }
+            last_result_sent = now;
+        }
+
+        if (showing_silence && !failure_from_peer &&
+            (last_failure_sent == 0 ||
+             now - last_failure_sent >= pdMS_TO_TICKS(PEER_PACKET_RETRY_MS))) {
+            const esp_err_t failure_err =
+                peer_link_send_failure(local_code_round, failure_reason == 1);
+            if (failure_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not send game over: %s", esp_err_to_name(failure_err));
+            }
+            last_failure_sent = now;
+        }
+
+        if ((showing_silence || showing_timeout_message || showing_volume_message) &&
+            (last_score_sent == 0 ||
+             now - last_score_sent >= pdMS_TO_TICKS(PEER_PACKET_RETRY_MS))) {
+            const esp_err_t score_err = peer_link_send_score(total_score);
+            if (score_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not send final score: %s", esp_err_to_name(score_err));
+            }
+            last_score_sent = now;
+        }
+
+        const bool can_detect_noise = game_active && peer_target_ready &&
+                                      !local_answer_ready && !showing_result &&
+                                      !showing_silence && now >= mic_detection_after;
         if (!can_detect_noise) {
             loud_noise_candidate = false;
         } else if (mic_level >= SILENCE_LEVEL) {
@@ -557,6 +737,12 @@ void app_main(void)
             showing_timeout_message = false;
             timeout_boom = false;
             volume_boom = true;
+            failure_reason = 2;
+            failure_from_peer = false;
+            last_failure_sent = 0;
+            local_ready = false;
+            peer_ready = false;
+            waiting_for_peer_start = false;
             active_colors = 0;
             loud_noise_candidate = false;
             start_armed = false;
@@ -608,19 +794,14 @@ void app_main(void)
                 showing_volume_message = false;
                 start_armed = false;
                 if (defeat_selection == 0) {
-                    game_active = true;
-                    game_started = now;
-                    mic_detection_after = now + pdMS_TO_TICKS(MIC_STARTUP_DELAY_MS);
-                    round_timer_ms = GAME_TIMER_MS;
-                    target = esp_random() % target_count;
-                    active_colors = 0;
-                    streak = 0;
-                    total_score = 0;
-                    loud_noise_candidate = false;
-                    wait_for_neutral = true;
+                    waiting_for_peer_start = true;
+                    local_ready = true;
+                    ready_mode = hard_mode;
+                    last_ready_sent = 0;
                 }
             }
-        } else if (!game_active && !showing_silence && !showing_result) {
+        } else if (!game_active && !waiting_for_peer_start &&
+                   !showing_silence && !showing_result) {
             if (!showing_timeout_message && !showing_volume_message) {
                 if (menu_button_pressed & (1u << BTN_UP)) {
                     hard_mode = false;
@@ -632,20 +813,15 @@ void app_main(void)
                 start_armed = true;
             } else if (start_armed) {
                 start_armed = false;
-                game_active = true;
-                game_started = now;
-                mic_detection_after = now + pdMS_TO_TICKS(MIC_STARTUP_DELAY_MS);
-                round_timer_ms = GAME_TIMER_MS;
-                target = esp_random() % target_count;
-                active_colors = 0;
-                streak = 0;
-                total_score = 0;
-                loud_noise_candidate = false;
-                wait_for_neutral = true;
+                waiting_for_peer_start = true;
+                local_ready = true;
+                ready_mode = hard_mode;
+                last_ready_sent = 0;
             }
         }
 
-        if (game_active && !showing_silence && !showing_result) {
+        if (game_active && peer_target_ready && !local_answer_ready &&
+            !showing_silence && !showing_result) {
             for (int i = 0; i < 3; i++) {
                 const uint32_t color = 1u << (BTN_KEY1 + i);
                 if (color_pressed & color) {
@@ -654,12 +830,20 @@ void app_main(void)
             }
         }
 
-        if (game_active && !showing_silence && !showing_result &&
+        if (game_active && peer_target_ready && !local_answer_ready &&
+            !showing_silence && !showing_result &&
             now - game_started >= pdMS_TO_TICKS(round_timer_ms)) {
             game_active = false;
             showing_silence = true;
             boom_started = now;
             timeout_boom = true;
+            volume_boom = false;
+            failure_reason = 1;
+            failure_from_peer = false;
+            last_failure_sent = 0;
+            local_ready = false;
+            peer_ready = false;
+            waiting_for_peer_start = false;
             showing_timeout_message = false;
             active_colors = 0;
             start_armed = false;
@@ -678,17 +862,14 @@ void app_main(void)
             if (now - result_since >= pdMS_TO_TICKS(result_duration_ms)) {
                 showing_result = false;
                 candidate = 0;
-                target = next_direction(target, target_count);
-                active_colors = 0;
-                if (answer_correct) {
-                    round_timer_ms = round_timer_ms * 995 / 1000;
-                    if (round_timer_ms < 1) {
-                        round_timer_ms = 1;
-                    }
-                    game_started = now;
+                if (!answer_correct) {
+                    local_answer_ready = false;
+                    active_colors = 0;
                 }
                 wait_for_neutral = direction != 0;
             }
+        } else if (!peer_target_ready || local_answer_ready) {
+            candidate = 0;
         } else if (wait_for_neutral) {
             if (direction == 0) {
                 wait_for_neutral = false;
@@ -699,16 +880,28 @@ void app_main(void)
             candidate = direction;
             candidate_since = now;
         } else if (now - candidate_since >= pdMS_TO_TICKS(DIRECTION_STABLE_MS)) {
-            const uint32_t direction_index = target % direction_count;
-            const uint32_t modifier_index = target / direction_count;
+            const uint32_t direction_index = peer_target % direction_count;
+            const uint32_t modifier_index = peer_target / direction_count;
             answer_correct = direction == s_directions[direction_index].mask &&
                              active_colors == s_modifier_masks[modifier_index];
             streak = answer_correct ? (streak % 10) + 1 : 0;
             if (answer_correct) {
                 total_score++;
             }
+            local_answer_ready = true;
+            const TickType_t elapsed = now - game_started;
+            local_remaining_ms = elapsed >= pdMS_TO_TICKS(round_timer_ms)
+                                     ? 0
+                                     : round_timer_ms - (int)pdTICKS_TO_MS(elapsed);
+            if (answer_correct) {
+                round_timer_ms = round_timer_ms * 995 / 1000;
+                if (round_timer_ms < 1) {
+                    round_timer_ms = 1;
+                }
+            }
             showing_result = true;
             result_since = now;
+            last_result_sent = 0;
             wait_for_neutral = true;
             candidate = 0;
         }
@@ -723,26 +916,32 @@ void app_main(void)
                     draw_boom_screen();
                 }
             } else if (showing_timeout_message) {
-                draw_defeat_screen(s_timeout_messages[timeout_message], total_score,
+                draw_defeat_screen(s_timeout_messages[timeout_message],
+                                   total_score + peer_total_score,
                                    defeat_selection);
             } else if (showing_volume_message) {
-                draw_defeat_screen(s_volume_messages[volume_message], total_score,
+                draw_defeat_screen(s_volume_messages[volume_message],
+                                   total_score + peer_total_score,
                                    defeat_selection);
             } else if (!game_active) {
-                draw_start_screen(NULL, hard_mode);
+                if (waiting_for_peer_start) {
+                    draw_waiting_for_player();
+                } else {
+                    draw_start_screen(NULL, hard_mode);
+                }
             } else {
                 char game_status[16];
-                TickType_t elapsed = now - game_started;
-                int timer_ms = elapsed >= pdMS_TO_TICKS(round_timer_ms)
+                int timer_ms = local_remaining_ms;
+                if (peer_target_ready && !local_answer_ready) {
+                    TickType_t elapsed = now - game_started;
+                    timer_ms = elapsed >= pdMS_TO_TICKS(round_timer_ms)
                                    ? 0
                                    : round_timer_ms - (int)pdTICKS_TO_MS(elapsed);
-                if (showing_result) {
-                    snprintf(game_status, sizeof(game_status), "%s", answer_correct ? "RIGHT" : "WRONG");
-                } else {
-                    format_target(game_status, sizeof(game_status), target, direction_count);
                 }
+                format_target(game_status, sizeof(game_status), target, direction_count);
                 draw_ui(buttons_read(), active_colors, mic_level, audio_ok, game_status, timer_ms,
-                        round_timer_ms, streak, hard_mode, is_c4_target(target, direction_count));
+                        round_timer_ms, streak, hard_mode,
+                        is_c4_target(target, direction_count));
             }
             display_flush();
         }
