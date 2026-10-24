@@ -76,7 +76,7 @@ static const char *s_volume_messages[] = {
     "Shhhhhhhhhhhhhhhhhhh!",
     "Ruidoso como gato\na la madrugada.",
     "Estornudaste? Salud!",
-    "Sneak decreased to -100",
+    "Sneak decreased\nto -100",
     "SILENZIO, BRUNO!",
     "Snake? Snake!?\nSNAKEEEEE!!!!"
 };
@@ -90,9 +90,9 @@ static const char *s_timeout_messages[] = {
     "\"Meep, meep.\"\n-El correcaminos.",
     "Kuchau.",
     "Gotta go fast!",
-    "Se te enfria el mate, pibe.",
-    "Tick Tock on the clock.",
-    "Mission failed. \nWe'll get 'em next time."
+    "Se te enfria\nel mate, pibe.",
+    "Tick Tock\non the clock.",
+    "Mission failed.\nWe'll get em next time."
 };
 
 static bool is_c4_target(uint32_t target, uint32_t direction_count){
@@ -106,13 +106,16 @@ static void format_target(char *buffer, size_t size, uint32_t target, uint32_t d
     const uint32_t direction_index = target % direction_count;
     const uint32_t modifier_index = target / direction_count;
     snprintf(buffer, size, "%s%s%s",
-             s_modifier_names[modifier_index],
+             modifier_index == 0 ? "K" : s_modifier_names[modifier_index],
              s_directions[direction_index].name,
              is_c4_target(target, direction_count) ? "!!!!" : "");
 }
 
 static const char *modifier_name_for_mask(uint32_t mask)
 {
+    if (mask == 0) {
+        return "K";
+    }
     for (int i = 1; i < 8; i++) {
         if (mask == s_modifier_masks[i]) {
             return s_modifier_names[i];
@@ -526,7 +529,6 @@ void app_main(void)
     bool local_ready = false;
     bool peer_ready = false;
     bool ready_mode = false;
-    bool peer_ready_mode = false;
     TickType_t last_ready_sent = 0;
     TickType_t last_code_sent = 0;
     TickType_t last_result_sent = 0;
@@ -586,7 +588,6 @@ void app_main(void)
                     continue;
                 }
                 peer_ready = true;
-                peer_ready_mode = peer_message.value != 0;
             } else if (peer_message.type == PEER_LINK_MESSAGE_FAILURE &&
                        (peer_message.value == 1 || peer_message.value == 2) &&
                        game_active && !showing_silence) {
@@ -649,7 +650,7 @@ void app_main(void)
         }
 
         if (waiting_for_peer_start && local_ready && peer_ready) {
-            hard_mode = local_is_a ? ready_mode : peer_ready_mode;
+            hard_mode = ready_mode;
             waiting_for_peer_start = false;
             peer_ready = false;
             game_active = true;

@@ -26,17 +26,21 @@ mantienen sus propios temporizadores y leen sus propios botones.
 
 Una instrucción combina una dirección y una selección de colores:
 
-| Código | Dirección |
+| Código sin color | Dirección |
 | --- | --- |
-| 1 | UP + LEFT |
-| 2 | UP + RIGHT |
-| 3 | DOWN + RIGHT |
-| 4 | DOWN + LEFT |
+| K1 | UP + LEFT |
+| K2 | UP + RIGHT |
+| K3 | DOWN + RIGHT |
+| K4 | DOWN + LEFT |
+
+En modo normal, el indicador de color actual también muestra **K** cuando no
+hay ningún color seleccionado.
 
 Los botones **KEY1**, **KEY2** y **KEY3** seleccionan los colores **R**, **G**
 y **B**. Se pueden combinar para formar los códigos **Y**, **M**, **C** y **W**;
-si no se requiere color, no pulses ninguno. La selección de color se alterna
-cada vez que se pulsa su botón.
+si no se requiere color, la instrucción muestra **K** junto al número (por
+ejemplo, **K1**) y no debes pulsar ningún botón de color. La selección de color
+se alterna cada vez que se pulsa su botón.
 
 Mantén la combinación direccional estable brevemente para confirmar la
 respuesta. Si es correcta, esa placa envía el resultado a su compañero y este
