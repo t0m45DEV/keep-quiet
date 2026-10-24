@@ -36,6 +36,11 @@ Una instrucción combina una dirección y una selección de colores:
 En modo normal, el indicador de color actual también muestra **K** cuando no
 hay ningún color seleccionado.
 
+Durante la partida, **Order: ...** identifica la instrucción que la otra placa
+debe ejecutar. Debajo de los botones **R**, **G** y **B**, **Sending: ...**
+muestra el estado de los colores que esta placa está enviando; sin colores
+seleccionados aparece **Sending: K**.
+
 Los botones **KEY1**, **KEY2** y **KEY3** seleccionan los colores **R**, **G**
 y **B**. Se pueden combinar para formar los códigos **Y**, **M**, **C** y **W**;
 si no se requiere color, la instrucción muestra **K** junto al número (por

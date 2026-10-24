@@ -16,7 +16,7 @@ static const char *TAG = "demo";
 #define UI_PERIOD_MS 50
 #define RIGHT_RESULT_MS 1000
 #define WRONG_RESULT_MS 2000
-#define GAME_TIMER_MS 10000
+#define GAME_TIMER_MS (20 * 1000)
 #define BOOM_FRAME_MS 80
 #define BOOM_FRAME_COUNT 5
 #define BOOM_TITLE_HOLD_MS 600
@@ -394,9 +394,11 @@ static void draw_defeat_screen(const char *message, uint32_t total_score, uint32
 
 // Dibuja la interfaz del juego, el temporizador y los controles.
 static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, bool audio_ok,
-                    const char *game_status, int timer_ms, int timer_duration_ms, uint32_t streak,
-                    bool hard_mode, bool c4_target){
+                    const char *game_status, int timer_ms, int timer_duration_ms,
+                    uint32_t streak){
     char line[24];
+    char order_line[24];
+    char sending_line[24];
 
     display_clear();
     display_text(0, 1, "TIME", false);
@@ -429,24 +431,19 @@ static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, boo
     display_text(29, 52, "3", false);
     display_text(7, 52, "4", false);
 
-    const int status_x = hard_mode
-                             ? (128 - (int)strlen(game_status) * DISPLAY_FONT_W) / 2
-                             : (c4_target && strcmp(game_status, "C4!!!!") == 0 ? 47 : 50);
-    display_text(status_x, 29, game_status, false);
-    if (!hard_mode) {
-        display_text(83, 29, modifier_name_for_mask(active_colors), false);
-    }
+    snprintf(order_line, sizeof(order_line), "Order: %s", game_status);
+    display_text(44, 29, order_line, false);
     for (int i = 0; i < 3; i++) {
         bool on = active_colors & (1u << (BTN_KEY1 + i));
-        int x = 50 + i * 15;
+        int x = 46 + i * 15;
         draw_key(x, 40, 13, on);
         char color[2] = {s_modifier_labels[i][0], 0};
         display_text(x + 4, 43, color, on);
     }
 
-    if (c4_target) {
-        display_text(0, 56, "ESTE EXPLOTA POSTA", false);
-    }
+    snprintf(sending_line, sizeof(sending_line), "Sending: %s",
+             modifier_name_for_mask(active_colors));
+    display_text(44, 56, sending_line, false);
 
     // Racha
     if (streak > 0) {
@@ -941,8 +938,7 @@ void app_main(void)
                 }
                 format_target(game_status, sizeof(game_status), target, direction_count);
                 draw_ui(buttons_read(), active_colors, mic_level, audio_ok, game_status, timer_ms,
-                        round_timer_ms, streak, hard_mode,
-                        is_c4_target(target, direction_count));
+                        round_timer_ms, streak);
             }
             display_flush();
         }
