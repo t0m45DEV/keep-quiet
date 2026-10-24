@@ -13,11 +13,13 @@
 static const char *TAG = "demo";
 
 #define UI_PERIOD_MS 50
-#define GAME_RESULT_MS 1500
+#define GAME_RESULT_MS 1000
 #define GAME_TIMER_MS 10000
 #define DIRECTION_STABLE_MS 80
-#define SILENCE_LEVEL 100
+#define SILENCE_LEVEL 90
 #define SILENCE_SCREEN_MS 5000
+#define MIC_REARM_DELAY_MS 500
+#define MIC_STARTUP_DELAY_MS 2000
 
 #define DIRECTION_MASK ((1u << BTN_UP) | (1u << BTN_DOWN) | (1u << BTN_LEFT) | (1u << BTN_RIGHT))
 #define MODIFIER_MASK ((1u << BTN_KEY1) | (1u << BTN_KEY2) | (1u << BTN_KEY3))
@@ -62,7 +64,7 @@ static const char *s_modifier_names[] = {
     "R+G+B",
 };
 
-static const char *s_start_messages[] = {
+static const char *s_volume_messages[] = {
     "¡Perdiste por hablar\nmuy alto!",
     "¡Habla menos!",
     "Shhhh! Despertaste\na todo el barrio!",
@@ -190,12 +192,11 @@ static void draw_centered_message(const char *message, int area_y, int area_heig
 static void draw_start_screen(const char *message)
 {
     display_clear();
-    display_text(49, 12, "START", true);
     if (message != NULL) {
-        draw_centered_message(message, 24, 20);
-        display_text(25, 48, "PRESIONA S", false);
+        draw_centered_message(message, 12, 24);
+        display_text(22, 46, "PRESIONA START", false);
     } else {
-        display_text(25, 34, "PRESIONA S", false);
+        display_text(22, 28, "PRESIONA START", false);
     }
 }
 
@@ -288,10 +289,9 @@ void app_main(void)
     uint32_t target = esp_random() % target_count;
     bool showing_result = false;
     bool game_active = false;
-    bool showing_start_message = false;
     bool showing_timeout_message = false;
     bool timeout_boom = false;
-    uint32_t start_message = 0;
+    uint32_t volume_message = 0;
     uint32_t timeout_message = 0;
     bool wait_for_neutral = true;
     bool answer_correct = false;
@@ -304,14 +304,18 @@ void app_main(void)
     TickType_t result_since = 0;
     TickType_t game_started = 0;
     TickType_t silence_since = 0;
+    TickType_t mic_detection_after = 0;
     bool showing_silence = false;
-    bool silence_triggered = false;
+    bool loud_noise_candidate = false;
+    bool volume_boom = false;
+    bool showing_volume_message = false;
     int log_div = 0;
     while (1) {
         button_event_t ev;
         if (xQueueReceive(events, &ev, pdMS_TO_TICKS(UI_PERIOD_MS)) == pdTRUE) {
             ESP_LOGI(TAG, "button %s %s", buttons_name(ev.id), ev.pressed ? "pressed" : "released");
             if (ev.pressed && audio_ok) {
+                mic_detection_after = xTaskGetTickCount() + pdMS_TO_TICKS(MIC_REARM_DELAY_MS);
                 audio_play_tone(s_button_freq[ev.id], 100);
             }
         }
@@ -319,16 +323,26 @@ void app_main(void)
         const TickType_t now = xTaskGetTickCount();
         const uint32_t all_buttons = buttons_read();
         const int mic_level = audio_ok ? audio_mic_level() : 0;
-        if (mic_level >= SILENCE_LEVEL && !silence_triggered) {
+        const bool can_detect_noise = game_active && !showing_result && !showing_silence &&
+                                      now >= mic_detection_after;
+        if (!can_detect_noise) {
+            loud_noise_candidate = false;
+        } else if (mic_level >= SILENCE_LEVEL) {
+            loud_noise_candidate = true;
+        } else {
+            loud_noise_candidate = false;
+        }
+        if (game_active && !showing_result && !showing_silence && loud_noise_candidate &&
+            can_detect_noise) {
             showing_silence = true;
-            silence_triggered = true;
             silence_since = now;
             game_active = false;
             showing_result = false;
-            showing_start_message = false;
             showing_timeout_message = false;
             timeout_boom = false;
+            volume_boom = true;
             active_colors = 0;
+            loud_noise_candidate = false;
             start_armed = false;
             wait_for_neutral = true;
             candidate = 0;
@@ -343,22 +357,25 @@ void app_main(void)
                 showing_timeout_message = true;
                 timeout_boom = false;
                 start_armed = false;
+            } else if (volume_boom) {
+                const uint32_t message_count =
+                    (uint32_t)(sizeof(s_volume_messages) / sizeof(s_volume_messages[0]));
+                volume_message = esp_random() % message_count;
+                showing_volume_message = true;
+                volume_boom = false;
+                start_armed = false;
             }
         }
-        if (!showing_silence && mic_level < SILENCE_LEVEL) {
-            silence_triggered = false;
-        }
-
         const uint32_t direction = all_buttons & DIRECTION_MASK;
         const uint32_t color_buttons = all_buttons & MODIFIER_MASK;
         const uint32_t color_pressed = color_buttons & ~previous_buttons;
         previous_buttons = color_buttons;
-        if (showing_timeout_message && !showing_silence) {
+        if ((showing_timeout_message || showing_volume_message) && !showing_silence) {
             if (!(all_buttons & (1u << BTN_KEY4))) {
                 start_armed = true;
             } else if (start_armed) {
                 showing_timeout_message = false;
-                showing_start_message = false;
+                showing_volume_message = false;
                 start_armed = false;
             }
         } else if (!game_active && !showing_silence && !showing_result) {
@@ -366,20 +383,14 @@ void app_main(void)
                 start_armed = true;
             } else if (start_armed) {
                 start_armed = false;
-                if (showing_start_message) {
-                    showing_start_message = false;
-                    game_active = true;
-                    game_started = now;
-                    round_timer_ms = GAME_TIMER_MS;
-                    target = esp_random() % target_count;
-                    active_colors = 0;
-                    wait_for_neutral = true;
-                } else {
-                    const uint32_t message_count =
-                        (uint32_t)(sizeof(s_start_messages) / sizeof(s_start_messages[0]));
-                    start_message = esp_random() % message_count;
-                    showing_start_message = true;
-                }
+                game_active = true;
+                game_started = now;
+                mic_detection_after = now + pdMS_TO_TICKS(MIC_STARTUP_DELAY_MS);
+                round_timer_ms = GAME_TIMER_MS;
+                target = esp_random() % target_count;
+                active_colors = 0;
+                loud_noise_candidate = false;
+                wait_for_neutral = true;
             }
         }
 
@@ -415,21 +426,16 @@ void app_main(void)
             if (now - result_since >= pdMS_TO_TICKS(GAME_RESULT_MS)) {
                 showing_result = false;
                 candidate = 0;
+                target = next_direction(target, target_count);
+                active_colors = 0;
                 if (answer_correct) {
-                    target = next_direction(target, target_count);
-                    active_colors = 0;
                     round_timer_ms = round_timer_ms * 995 / 1000;
                     if (round_timer_ms < 1) {
                         round_timer_ms = 1;
                     }
-                    game_started = now;
-                    wait_for_neutral = direction != 0;
-                } else {
-                    game_active = false;
-                    showing_start_message = false;
-                    start_armed = !(all_buttons & (1u << BTN_KEY4));
-                    wait_for_neutral = true;
                 }
+                game_started = now;
+                wait_for_neutral = direction != 0;
             }
         } else if (wait_for_neutral) {
             if (direction == 0) {
@@ -456,8 +462,10 @@ void app_main(void)
                 draw_boom_screen();
             } else if (showing_timeout_message) {
                 draw_timeout_screen(s_timeout_messages[timeout_message]);
+            } else if (showing_volume_message) {
+                draw_timeout_screen(s_volume_messages[volume_message]);
             } else if (!game_active) {
-                draw_start_screen(showing_start_message ? s_start_messages[start_message] : NULL);
+                draw_start_screen(NULL);
             } else {
                 char game_status[16];
                 TickType_t elapsed = now - game_started;
