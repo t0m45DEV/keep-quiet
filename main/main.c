@@ -58,25 +58,28 @@ static const char *s_modifier_names[] = {
     "",
     "R",
     "G",
-    "R+G",
+    "Y",
     "B",
-    "R+B",
-    "G+B",
-    "R+G+B",
+    "M",
+    "C",
+    "W",
 };
 
 static const char *s_volume_messages[] = {
-    "¡Perdiste por hablar\nmuy alto!",
-    "¡Habla menos!",
-    "Shhhh! Despertaste\na todo el barrio!",
-    "Shhhhhhhhhhhhhhhhhhh!"
+    "Perdiste por hablar\nmuy alto!",
+    "Habla menos!",
+    "Despertaste a todo el barrio!",
+    "Shhhhhhhhhhhhhhhhhhh!",
+    "Ruidoso como gato\na la madrugada.",
+    "Estornudaste? Salud!"
 };
 
 static const char *s_timeout_messages[] = {
     "Te quedaste\nsin tiempo!",
+    "Metele al acelerador",
     "Manuelita?",
-    "Si no corres se te\nva el bondi...",
-    "Fui yo Barry."
+    "Si no corres, se te\nva el bondi...",
+    "Fui yo, Barry."
 };
 
 // Elige un objetivo aleatorio distinto del actual.
@@ -89,6 +92,13 @@ static uint32_t next_direction(uint32_t current, uint32_t count)
     return next;
 }
 
+static bool is_c4_target(uint32_t target, uint32_t direction_count)
+{
+    const uint32_t direction_index = target % direction_count;
+    const uint32_t modifier_index = target / direction_count;
+    return modifier_index == 6 && direction_index == 3;
+}
+
 // Formatea los colores requeridos y la dirección objetivo.
 static void format_target(char *buffer, size_t size, uint32_t target, uint32_t direction_count)
 {
@@ -96,8 +106,18 @@ static void format_target(char *buffer, size_t size, uint32_t target, uint32_t d
     const uint32_t modifier_index = target / direction_count;
     snprintf(buffer, size, "%s%s%s",
              s_modifier_names[modifier_index],
-             s_modifier_names[modifier_index][0] ? "+" : "",
-             s_directions[direction_index].name);
+             s_directions[direction_index].name,
+             is_c4_target(target, direction_count) ? "!!!!" : "");
+}
+
+static const char *modifier_name_for_mask(uint32_t mask)
+{
+    for (int i = 1; i < 8; i++) {
+        if (mask == s_modifier_masks[i]) {
+            return s_modifier_names[i];
+        }
+    }
+    return "";
 }
 
 static const int s_button_freq[BTN_COUNT] = {
@@ -154,6 +174,12 @@ static void draw_boom_screen(void)
     }
 }
 
+static void draw_centered_text(const char *text, int y)
+{
+    const int x = (128 - (int)strlen(text) * DISPLAY_FONT_W) / 2;
+    display_text(x, y, text, false);
+}
+
 // Dibuja líneas centradas en un área, respetando los saltos de línea del mensaje.
 static void draw_centered_message(const char *message, int area_y, int area_height)
 {
@@ -177,8 +203,7 @@ static void draw_centered_message(const char *message, int area_y, int area_heig
         const size_t copy_length = length < sizeof(line) - 1 ? length : sizeof(line) - 1;
         memcpy(line, line_start, copy_length);
         line[copy_length] = '\0';
-        const int x = (128 - (int)copy_length * DISPLAY_FONT_W) / 2;
-        display_text(x, y, line, false);
+        draw_centered_text(line, y);
         y += DISPLAY_FONT_H;
 
         if (*line_end == '\0') {
@@ -190,27 +215,41 @@ static void draw_centered_message(const char *message, int area_y, int area_heig
 }
 
 // Muestra el inicio y el mensaje aleatorio seleccionado, si lo hay.
-static void draw_start_screen(const char *message)
+static void draw_start_screen(const char *message, bool hard_mode)
 {
     display_clear();
     if (message != NULL) {
         draw_centered_message(message, 12, 24);
-        display_text(22, 46, "PRESIONA START", false);
+        display_text(22, 46, "PRESIONE START", false);
     } else {
-        display_text(22, 28, "PRESIONA START", false);
+        display_text(16, 7, "DIFICULTAD:", false);
+        display_text(26, hard_mode ? 38 : 24, ">", false);
+        display_text(35, 24, "NORMAL", false);
+        display_text(35, 38, "RE DIFICIL", false);
+        display_text(22, 54, "APRETAME START", false);
     }
 }
 
 // Muestra el mensaje de derrota como único contenido de la pantalla.
-static void draw_timeout_screen(const char *message)
+static void draw_timeout_screen(const char *message, uint32_t total_score)
 {
+    char score_line[32];
+
     display_clear();
-    draw_centered_message(message, 0, 64);
+    draw_centered_message(message, 0, 38);
+    const int score_length = snprintf(score_line, sizeof(score_line), "Puntos totales: %u",
+                                      (unsigned int)total_score);
+    const char *score_text = score_line;
+    if (score_length * DISPLAY_FONT_W > 128) {
+        snprintf(score_line, sizeof(score_line), "Puntos: %u", (unsigned int)total_score);
+    }
+    draw_centered_text(score_text, 54);
 }
 
 // Dibuja la interfaz del juego, el temporizador y los controles.
 static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, bool audio_ok,
-                    const char *game_status, int timer_ms, int timer_duration_ms, uint32_t streak)
+                    const char *game_status, int timer_ms, int timer_duration_ms, uint32_t streak,
+                    bool hard_mode, bool c4_target)
 {
     char line[24];
 
@@ -242,13 +281,23 @@ static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, boo
     display_text(29, 52, "3", false);
     display_text(7, 52, "4", false);
 
-    display_text(50, 29, game_status, false);
+    const int status_x = hard_mode
+                             ? (128 - (int)strlen(game_status) * DISPLAY_FONT_W) / 2
+                             : (c4_target && strcmp(game_status, "C4!!!!") == 0 ? 47 : 50);
+    display_text(status_x, 29, game_status, false);
+    if (!hard_mode) {
+        display_text(83, 29, modifier_name_for_mask(active_colors), false);
+    }
     for (int i = 0; i < 3; i++) {
         bool on = active_colors & (1u << (BTN_KEY1 + i));
         int x = 50 + i * 15;
         draw_key(x, 40, 13, on);
         char color[2] = {s_modifier_labels[i][0], 0};
         display_text(x + 4, 43, color, on);
+    }
+
+    if (c4_target) {
+        display_text(0, 56, "ESTE EXPLOTA POSTA", false);
     }
 
     // Racha
@@ -305,9 +354,12 @@ void app_main(void)
     bool answer_correct = false;
     bool start_armed = true;
     uint32_t streak = 0;
+    uint32_t total_score = 0;
     uint32_t active_colors = 0;
     int round_timer_ms = GAME_TIMER_MS;
     uint32_t previous_buttons = 0;
+    uint32_t previous_menu_buttons = 0;
+    bool hard_mode = false;
     uint32_t candidate = 0;
     TickType_t candidate_since = 0;
     TickType_t result_since = 0;
@@ -376,6 +428,9 @@ void app_main(void)
             }
         }
         const uint32_t direction = all_buttons & DIRECTION_MASK;
+        const uint32_t menu_buttons = all_buttons & ((1u << BTN_UP) | (1u << BTN_DOWN));
+        const uint32_t menu_button_pressed = menu_buttons & ~previous_menu_buttons;
+        previous_menu_buttons = menu_buttons;
         const uint32_t color_buttons = all_buttons & MODIFIER_MASK;
         const uint32_t color_pressed = color_buttons & ~previous_buttons;
         previous_buttons = color_buttons;
@@ -388,6 +443,13 @@ void app_main(void)
                 start_armed = false;
             }
         } else if (!game_active && !showing_silence && !showing_result) {
+            if (!showing_timeout_message && !showing_volume_message) {
+                if (menu_button_pressed & (1u << BTN_UP)) {
+                    hard_mode = false;
+                } else if (menu_button_pressed & (1u << BTN_DOWN)) {
+                    hard_mode = true;
+                }
+            }
             if (!(all_buttons & (1u << BTN_KEY4))) {
                 start_armed = true;
             } else if (start_armed) {
@@ -399,6 +461,7 @@ void app_main(void)
                 target = esp_random() % target_count;
                 active_colors = 0;
                 streak = 0;
+                total_score = 0;
                 loud_noise_candidate = false;
                 wait_for_neutral = true;
             }
@@ -463,6 +526,9 @@ void app_main(void)
             answer_correct = direction == s_directions[direction_index].mask &&
                              active_colors == s_modifier_masks[modifier_index];
             streak = answer_correct ? (streak % 10) + 1 : 0;
+            if (answer_correct) {
+                total_score++;
+            }
             showing_result = true;
             result_since = now;
             wait_for_neutral = true;
@@ -473,11 +539,11 @@ void app_main(void)
             if (showing_silence) {
                 draw_boom_screen();
             } else if (showing_timeout_message) {
-                draw_timeout_screen(s_timeout_messages[timeout_message]);
+                draw_timeout_screen(s_timeout_messages[timeout_message], total_score);
             } else if (showing_volume_message) {
-                draw_timeout_screen(s_volume_messages[volume_message]);
+                draw_timeout_screen(s_volume_messages[volume_message], total_score);
             } else if (!game_active) {
-                draw_start_screen(NULL);
+                draw_start_screen(NULL, hard_mode);
             } else {
                 char game_status[16];
                 TickType_t elapsed = now - game_started;
@@ -490,7 +556,7 @@ void app_main(void)
                     format_target(game_status, sizeof(game_status), target, direction_count);
                 }
                 draw_ui(buttons_read(), active_colors, mic_level, audio_ok, game_status, timer_ms,
-                        round_timer_ms, streak);
+                        round_timer_ms, streak, hard_mode, is_c4_target(target, direction_count));
             }
             display_flush();
         }
