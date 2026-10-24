@@ -13,7 +13,8 @@
 static const char *TAG = "demo";
 
 #define UI_PERIOD_MS 50
-#define GAME_RESULT_MS 1000
+#define RIGHT_RESULT_MS 1000
+#define WRONG_RESULT_MS 2000
 #define GAME_TIMER_MS 10000
 #define DIRECTION_STABLE_MS 80
 #define SILENCE_LEVEL 90
@@ -209,7 +210,7 @@ static void draw_timeout_screen(const char *message)
 
 // Dibuja la interfaz del juego, el temporizador y los controles.
 static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, bool audio_ok,
-                    const char *game_status, int timer_ms, int timer_duration_ms)
+                    const char *game_status, int timer_ms, int timer_duration_ms, uint32_t streak)
 {
     char line[24];
 
@@ -248,6 +249,13 @@ static void draw_ui(uint32_t pressed, uint32_t active_colors, int mic_level, boo
         draw_key(x, 40, 13, on);
         char color[2] = {s_modifier_labels[i][0], 0};
         display_text(x + 4, 43, color, on);
+    }
+
+    // Racha
+    if (streak > 0) {
+        snprintf(line, sizeof(line), "%u", (unsigned int)streak);
+        const int x = 128 - (int)strlen(line) * DISPLAY_FONT_W;
+        display_text(x, 56, line, false);
     }
 }
 
@@ -296,6 +304,7 @@ void app_main(void)
     bool wait_for_neutral = true;
     bool answer_correct = false;
     bool start_armed = true;
+    uint32_t streak = 0;
     uint32_t active_colors = 0;
     int round_timer_ms = GAME_TIMER_MS;
     uint32_t previous_buttons = 0;
@@ -389,6 +398,7 @@ void app_main(void)
                 round_timer_ms = GAME_TIMER_MS;
                 target = esp_random() % target_count;
                 active_colors = 0;
+                streak = 0;
                 loud_noise_candidate = false;
                 wait_for_neutral = true;
             }
@@ -423,7 +433,8 @@ void app_main(void)
             if (direction == 0) {
                 wait_for_neutral = false;
             }
-            if (now - result_since >= pdMS_TO_TICKS(GAME_RESULT_MS)) {
+            const int result_duration_ms = answer_correct ? RIGHT_RESULT_MS : WRONG_RESULT_MS;
+            if (now - result_since >= pdMS_TO_TICKS(result_duration_ms)) {
                 showing_result = false;
                 candidate = 0;
                 target = next_direction(target, target_count);
@@ -433,8 +444,8 @@ void app_main(void)
                     if (round_timer_ms < 1) {
                         round_timer_ms = 1;
                     }
+                    game_started = now;
                 }
-                game_started = now;
                 wait_for_neutral = direction != 0;
             }
         } else if (wait_for_neutral) {
@@ -451,6 +462,7 @@ void app_main(void)
             const uint32_t modifier_index = target / direction_count;
             answer_correct = direction == s_directions[direction_index].mask &&
                              active_colors == s_modifier_masks[modifier_index];
+            streak = answer_correct ? (streak % 10) + 1 : 0;
             showing_result = true;
             result_since = now;
             wait_for_neutral = true;
@@ -478,7 +490,7 @@ void app_main(void)
                     format_target(game_status, sizeof(game_status), target, direction_count);
                 }
                 draw_ui(buttons_read(), active_colors, mic_level, audio_ok, game_status, timer_ms,
-                        round_timer_ms);
+                        round_timer_ms, streak);
             }
             display_flush();
         }
